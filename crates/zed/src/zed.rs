@@ -18,6 +18,7 @@ use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
+use docker_panel::DockerPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt, PanicFeatureFlag};
@@ -590,6 +591,7 @@ fn initialize_panels(
             cx.clone(),
         );
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
+        let docker_panel = DockerPanel::load(workspace_handle.clone(), cx.clone());
 
         let (
             project_panel,
@@ -599,6 +601,7 @@ fn initialize_panels(
             channels_panel,
             notification_panel,
             debug_panel,
+            docker_panel,
         ) = futures::try_join!(
             project_panel,
             outline_panel,
@@ -607,6 +610,7 @@ fn initialize_panels(
             channels_panel,
             notification_panel,
             debug_panel,
+            docker_panel,
         )?;
 
         workspace_handle.update_in(cx, |workspace, window, cx| {
@@ -617,6 +621,7 @@ fn initialize_panels(
             workspace.add_panel(channels_panel, window, cx);
             workspace.add_panel(notification_panel, window, cx);
             workspace.add_panel(debug_panel, window, cx);
+            workspace.add_panel(docker_panel, window, cx);
         })?;
 
         fn setup_or_teardown_agent_panel(
@@ -4839,6 +4844,7 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
+            docker_panel::init(cx);
             initialize_workspace(app_state.clone(), prompt_builder, cx);
             search::init(cx);
             app_state

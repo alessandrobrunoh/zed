@@ -50,6 +50,7 @@ debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
 debugger_ui.workspace = true
 diagnostics.workspace = true
+docker_panel.workspace = true
 editor.workspace = true
 zeta2_tools.workspace = true
 env_logger.workspace = true

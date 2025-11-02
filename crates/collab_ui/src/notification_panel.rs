@@ -7,9 +7,9 @@ use db::kvp::KEY_VALUE_STORE;
 use futures::StreamExt;
 use gpui::{
     AnyElement, App, AsyncWindowContext, ClickEvent, Context, DismissEvent, Element, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ListAlignment,
-    ListScrollEvent, ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Task,
-    WeakEntity, Window, actions, div, img, list, px,
+    EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
+    ListAlignment, ListScrollEvent, ListState, ParentElement, Render, StatefulInteractiveElement,
+    Styled, Task, WeakEntity, Window, actions, div, img, px,
 };
 use notifications::{NotificationEntry, NotificationEvent, NotificationStore};
 use project::Fs;
@@ -17,10 +17,10 @@ use rpc::proto;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::{sync::Arc, time::Duration};
+use task::{RevealStrategy, SpawnInTerminal, TaskId};
+use terminal_view::terminal_panel::TerminalPanel;
 use time::{OffsetDateTime, UtcOffset};
-use ui::{
-    Avatar, Button, Icon, IconButton, IconName, Label, Tab, Tooltip, h_flex, prelude::*, v_flex,
-};
+use ui::{Avatar, Button, IconButton, IconName, Label, Tab, Tooltip, h_flex, prelude::*, v_flex};
 use util::{ResultExt, TryFutureExt};
 use workspace::notifications::{
     Notification as WorkspaceNotification, NotificationId, SuppressEvent,
@@ -29,6 +29,7 @@ use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
+use zed_actions::RevealTarget;
 
 const LOADING_THRESHOLD: usize = 30;
 const MARK_AS_READ_DELAY: Duration = Duration::from_secs(1);
@@ -52,6 +53,28 @@ pub struct NotificationPanel {
     focus_handle: FocusHandle,
     mark_as_read_tasks: HashMap<u64, Task<Result<()>>>,
     unseen_notifications: Vec<NotificationEntry>,
+    // Docker fields
+    docker_running: bool,
+    docker_containers: Vec<DockerContainer>,
+    docker_refresh_task: Option<Task<()>>,
+    docker_event_task: Option<Task<()>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockerContainer {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub state: ContainerState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ContainerState {
+    Running,
+    Stopped,
+    Paused,
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,7 +171,15 @@ impl NotificationPanel {
                 mark_as_read_tasks: HashMap::default(),
                 width: None,
                 unseen_notifications: Vec::new(),
+                // Docker fields
+                docker_running: false,
+                docker_containers: Vec::new(),
+                docker_refresh_task: None,
+                docker_event_task: None,
             };
+
+            // Avvia il refresh Docker
+            this.refresh_docker_status(cx);
 
             let mut old_dock_position = this.position(window, cx);
             this.subscriptions.extend([
@@ -511,6 +542,147 @@ impl NotificationPanel {
             store.respond_to_notification(notification, response, cx);
         });
     }
+
+    // Docker methods
+    fn refresh_docker_status(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            let docker_running = check_docker_running(cx).await.unwrap_or(false);
+            let containers = if docker_running {
+                get_docker_containers(cx).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            this.update(cx, |this, cx| {
+                this.docker_running = docker_running;
+                this.docker_containers = containers;
+                cx.notify();
+            })
+            .log_err();
+        });
+
+        self.docker_refresh_task = Some(task);
+
+        // Avvia il monitoraggio eventi solo se non è già attivo
+        if self.docker_event_task.is_none() {
+            self.start_docker_event_monitoring(cx);
+        }
+    }
+
+    fn start_docker_event_monitoring(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, mut cx| {
+            loop {
+                if let Ok(()) = monitor_docker_events(this.clone(), cx.clone()).await {
+                    // Se il monitoring termina normalmente, aspetta un po' prima di riavviare
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                } else {
+                    // Se c'è un errore, aspetta più a lungo
+                    smol::Timer::after(std::time::Duration::from_secs(10)).await;
+                }
+            }
+        });
+
+        self.docker_event_task = Some(task);
+    }
+
+    fn toggle_container(
+        &mut self,
+        container_id: String,
+        current_state: ContainerState,
+        cx: &mut Context<Self>,
+    ) {
+        let task = cx.spawn(async move |this, cx| {
+            let result = if current_state == ContainerState::Running {
+                stop_container(&container_id, cx).await
+            } else {
+                start_container(&container_id, cx).await
+            };
+
+            if let Err(err) = result {
+                log::error!("Failed to toggle container: {}", err);
+            }
+
+            this.update(cx, |this, cx| {
+                this.refresh_docker_status(cx);
+            })
+            .log_err();
+        });
+
+        task.detach();
+    }
+
+    fn view_container_logs(
+        &mut self,
+        container_id: String,
+        container_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::info!(
+            "Opening logs for container: {} ({})",
+            container_name,
+            container_id
+        );
+
+        let workspace = self.workspace.clone();
+
+        let result = workspace.update(cx, |workspace, cx| {
+            log::info!("Getting terminal panel...");
+
+            let terminal_panel = workspace.panel::<TerminalPanel>(cx);
+
+            if terminal_panel.is_none() {
+                log::error!("Terminal panel not found!");
+                return None;
+            }
+
+            let terminal_panel = terminal_panel?;
+
+            log::info!("Creating terminal task...");
+
+            let task = SpawnInTerminal {
+                id: TaskId(format!("docker-logs-{}", container_id)),
+                full_label: format!("Docker Logs: {}", container_name),
+                label: format!("Logs: {}", container_name),
+                command: Some("docker".to_string()),
+                args: vec![
+                    "logs".to_string(),
+                    "-f".to_string(),
+                    "--tail".to_string(),
+                    "100".to_string(),
+                    "--timestamps".to_string(),
+                    container_id.clone(),
+                ],
+                command_label: format!("docker logs -f --tail 100 --timestamps {}", container_name),
+                cwd: None,
+                use_new_terminal: true,
+                allow_concurrent_runs: true,
+                reveal: RevealStrategy::Always,
+                reveal_target: RevealTarget::default(),
+                env: Default::default(),
+                shell: Default::default(),
+                hide: Default::default(),
+                show_summary: false,
+                show_command: false,
+                show_rerun: false,
+            };
+
+            log::info!("Adding terminal task...");
+
+            let task_result = terminal_panel.update(cx, |panel, cx| {
+                panel.add_terminal_task(task, RevealStrategy::Always, window, cx)
+            });
+
+            task_result.detach();
+            log::info!("Terminal task added successfully");
+
+            Some(())
+        });
+
+        if let Err(e) = result {
+            log::error!("Failed to update workspace: {}", e);
+        }
+    }
 }
 
 impl Render for NotificationPanel {
@@ -522,77 +694,148 @@ impl Render for NotificationPanel {
                     .justify_between()
                     .px_2()
                     .py_1()
-                    // Match the height of the tab bar so they line up.
                     .h(Tab::container_height(cx))
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .child(Label::new("Notifications"))
-                    .child(Icon::new(IconName::Envelope)),
+                    .child(Label::new("Notifiche"))
+                    .child(
+                        IconButton::new("refresh_docker", IconName::ArrowCircle).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.refresh_docker_status(cx);
+                            }),
+                        ),
+                    ),
             )
             .map(|this| {
-                if !self.client.status().borrow().is_connected() {
+                if !self.docker_running {
                     this.child(
-                        v_flex()
-                            .gap_2()
-                            .p_4()
-                            .child(
-                                Button::new("connect_prompt_button", "Connect")
-                                    .icon_color(Color::Muted)
-                                    .icon(IconName::Github)
-                                    .icon_position(IconPosition::Start)
-                                    .style(ButtonStyle::Filled)
-                                    .full_width()
-                                    .on_click({
-                                        let client = self.client.clone();
-                                        move |_, window, cx| {
-                                            let client = client.clone();
-                                            window
-                                                .spawn(cx, async move |cx| {
-                                                    match client.connect(true, cx).await {
-                                                        util::ConnectionResult::Timeout => {
-                                                            log::error!("Connection timeout");
-                                                        }
-                                                        util::ConnectionResult::ConnectionReset => {
-                                                            log::error!("Connection reset");
-                                                        }
-                                                        util::ConnectionResult::Result(r) => {
-                                                            r.log_err();
-                                                        }
-                                                    }
-                                                })
-                                                .detach()
-                                        }
-                                    }),
-                            )
-                            .child(
-                                div().flex().w_full().items_center().child(
-                                    Label::new("Connect to view notifications.")
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                ),
-                            ),
-                    )
-                } else if self.notification_list.item_count() == 0 {
-                    this.child(
-                        v_flex().p_4().child(
+                        v_flex().p_4().gap_2().child(
                             div().flex().w_full().items_center().child(
-                                Label::new("You have no notifications.")
+                                Label::new("Docker non è avviato. Avvialo per vedere i container.")
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            ),
+                        ),
+                    )
+                } else if self.docker_containers.is_empty() {
+                    this.child(
+                        v_flex().p_4().gap_2().child(
+                            div().flex().w_full().items_center().child(
+                                Label::new("Nessun container trovato.")
                                     .color(Color::Muted)
                                     .size(LabelSize::Small),
                             ),
                         ),
                     )
                 } else {
-                    this.child(
-                        list(
-                            self.notification_list.clone(),
-                            cx.processor(|this, ix, window, cx| {
-                                this.render_notification(ix, window, cx)
-                                    .unwrap_or_else(|| div().into_any())
-                            }),
-                        )
-                        .size_full(),
-                    )
+                    let mut container_list = v_flex().size_full().p_2().gap_3();
+
+                    for (idx, container) in self.docker_containers.iter().enumerate() {
+                        let container_id = container.id.clone();
+                        let container_id_for_logs = container.id.clone();
+                        let container_name = container.name.clone();
+                        let current_state = container.state.clone();
+                        let is_running = current_state == ContainerState::Running;
+                        let button_text = if is_running { "Stop" } else { "Start" };
+                        let status_color = if is_running {
+                            Color::Success
+                        } else {
+                            Color::Muted
+                        };
+                        let status_icon = if is_running {
+                            IconName::Check
+                        } else {
+                            IconName::XCircle
+                        };
+
+                        container_list = container_list.child(
+                            v_flex()
+                                .p_3()
+                                .gap_2()
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .rounded_lg()
+                                .bg(cx.theme().colors().element_background)
+                                .hover(|style| style.bg(cx.theme().colors().element_hover))
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .items_center()
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    div().child(
+                                                        ui::Icon::new(status_icon)
+                                                            .size(ui::IconSize::Small)
+                                                            .color(status_color),
+                                                    ),
+                                                )
+                                                .child(
+                                                    Label::new(container.name.clone())
+                                                        .weight(FontWeight::BOLD)
+                                                        .size(LabelSize::Default),
+                                                ),
+                                        )
+                                        .child(
+                                            Label::new(container.status.clone())
+                                                .color(status_color)
+                                                .size(LabelSize::Small),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new(format!("Image: {}", container.image))
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "ID: {}",
+                                                &container.id[..12.min(container.id.len())]
+                                            ))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new(("toggle", idx), button_text)
+                                                .style(ButtonStyle::Filled)
+                                                .full_width()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.toggle_container(
+                                                        container_id.clone(),
+                                                        current_state.clone(),
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(("logs", idx), "Logs")
+                                                .style(ButtonStyle::Subtle)
+                                                .full_width()
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.view_container_logs(
+                                                            container_id_for_logs.clone(),
+                                                            container_name.clone(),
+                                                            _window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        );
+                    }
+
+                    this.child(container_list)
                 }
             })
     }
@@ -770,3 +1013,147 @@ impl Render for NotificationToast {
 
 impl EventEmitter<DismissEvent> for NotificationToast {}
 impl EventEmitter<SuppressEvent> for NotificationToast {}
+
+// Docker helper functions using Docker CLI
+
+async fn check_docker_running(_cx: &mut gpui::AsyncApp) -> anyhow::Result<bool> {
+    let output = smol::process::Command::new("docker")
+        .arg("info")
+        .arg("--format")
+        .arg("{{json .}}")
+        .output()
+        .await;
+
+    match output {
+        Ok(output) => Ok(output.status.success()),
+        Err(_) => Ok(false),
+    }
+}
+
+async fn get_docker_containers(_cx: &mut gpui::AsyncApp) -> anyhow::Result<Vec<DockerContainer>> {
+    let output = smol::process::Command::new("docker")
+        .args(["ps", "-a", "--format", "{{json .}}"])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut containers = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            let state_str = value["State"].as_str().unwrap_or("unknown").to_lowercase();
+            let state = match state_str.as_str() {
+                "running" => ContainerState::Running,
+                "exited" | "stopped" => ContainerState::Stopped,
+                "paused" => ContainerState::Paused,
+                _ => ContainerState::Unknown,
+            };
+
+            let name = value["Names"]
+                .as_str()
+                .unwrap_or("unnamed")
+                .trim_start_matches('/')
+                .to_string();
+
+            containers.push(DockerContainer {
+                id: value["ID"].as_str().unwrap_or("").to_string(),
+                name,
+                image: value["Image"].as_str().unwrap_or("").to_string(),
+                status: value["Status"].as_str().unwrap_or("").to_string(),
+                state,
+            });
+        }
+    }
+
+    Ok(containers)
+}
+
+async fn start_container(container_id: &str, _cx: &mut gpui::AsyncApp) -> anyhow::Result<()> {
+    let output = smol::process::Command::new("docker")
+        .args(["start", container_id])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start container: {}", stderr);
+    }
+
+    Ok(())
+}
+
+async fn stop_container(container_id: &str, _cx: &mut gpui::AsyncApp) -> anyhow::Result<()> {
+    let output = smol::process::Command::new("docker")
+        .args(["stop", container_id])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to stop container: {}", stderr);
+    }
+
+    Ok(())
+}
+
+async fn monitor_docker_events(
+    panel: WeakEntity<NotificationPanel>,
+    mut cx: gpui::AsyncApp,
+) -> anyhow::Result<()> {
+    use futures::AsyncBufReadExt;
+    use futures::io::BufReader;
+
+    let mut child = smol::process::Command::new("docker")
+        .args([
+            "events",
+            "--format",
+            "{{json .}}",
+            "--filter",
+            "type=container",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+
+        while let Some(line) = lines.next().await {
+            match line {
+                Ok(line) => {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(action) = event["Action"].as_str() {
+                            if action == "start"
+                                || action == "stop"
+                                || action == "die"
+                                || action == "pause"
+                                || action == "unpause"
+                                || action == "kill"
+                            {
+                                panel
+                                    .update(&mut cx, |this, cx| {
+                                        this.refresh_docker_status(cx);
+                                    })
+                                    .log_err();
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Docker event stream error: {}", e);
+                    return Err(anyhow::anyhow!("Event stream error: {}", e));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
