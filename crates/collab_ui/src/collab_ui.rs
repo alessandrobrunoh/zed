@@ -2,6 +2,7 @@ pub mod channel_view;
 pub mod collab_panel;
 pub mod notification_panel;
 pub mod notifications;
+pub mod todo_panel;
 mod panel_settings;
 
 use std::{rc::Rc, sync::Arc};
@@ -24,6 +25,7 @@ pub fn init(app_state: &Arc<AppState>, cx: &mut App) {
     channel_view::init(cx);
     collab_panel::init(cx);
     notification_panel::init(cx);
+    todo_panel::init(cx);
     notifications::init(app_state, cx);
     title_bar::init(cx);
 }
