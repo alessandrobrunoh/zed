@@ -456,6 +456,7 @@ impl Render for PortForwardingPopover {
         v_flex()
             .id("port-forwarding-popover")
             .track_focus(&self.focus_handle)
+            .tab_group()
             .w(px(384.))
             .max_h(px(480.))
             .gap_2()
@@ -513,6 +514,11 @@ impl Render for PortForwardingPopover {
                     cx.emit(DismissEvent);
                 }
             }))
+            .on_action(|_: &menu::SelectNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &menu::SelectPrevious, window, cx| window.focus_prev(cx))
+            .on_action(|_: &editor::actions::Tab, window, cx| window.focus_next(cx))
+            .on_action(|_: &editor::actions::Backtab, window, cx| window.focus_prev(cx))
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .into_any_element()
     }
 }
@@ -525,47 +531,40 @@ impl PortForwardingPopover {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let edit_forward = forward.clone();
         let delete_forward = forward.clone();
         h_flex()
             .id(format!("port-forward-row-{index}"))
             .w_full()
-            .min_h_8()
-            .px_2()
-            .gap_2()
-            .justify_between()
-            .rounded_md()
-            .hover(|style| style.bg(cx.theme().colors().element_hover))
+            .gap_1()
             .child(
-                Label::new(format_forward(&forward))
-                    .size(LabelSize::Small)
-                    .truncate(),
+                div().flex_1().min_w_0().child(
+                    Button::new(
+                        format!("edit-port-forward-{index}"),
+                        format_forward(&forward),
+                    )
+                    .w_full()
+                    .label_size(LabelSize::Small)
+                    .truncate(true)
+                    .end_icon(Icon::new(IconName::Pencil).size(IconSize::Small))
+                    .style(ButtonStyle::Subtle)
+                    .disabled(self.editor.is_some() || self.is_saving)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_edit(Some(forward.clone()), window, cx);
+                    })),
+                ),
             )
             .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        IconButton::new(format!("edit-port-forward-{index}"), IconName::Pencil)
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .aria_label("Edit port forward")
-                            .tooltip(Tooltip::text("Edit Port Forward"))
-                            .disabled(self.editor.is_some() || self.is_saving)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_edit(Some(edit_forward.clone()), window, cx);
-                            })),
-                    )
-                    .child(
-                        IconButton::new(format!("delete-port-forward-{index}"), IconName::Trash)
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .aria_label("Remove port forward")
-                            .tooltip(Tooltip::text("Remove Port Forward"))
-                            .disabled(self.editor.is_some() || self.is_saving)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_delete(delete_forward.clone(), window, cx);
-                            })),
-                    ),
+                IconButton::new(format!("delete-port-forward-{index}"), IconName::Trash)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Error)
+                    .style(ButtonStyle::Subtle)
+                    .aria_label("Delete port forward")
+                    .tooltip(Tooltip::text("Delete Port Forward"))
+                    .disabled(self.editor.is_some() || self.is_saving)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_delete(delete_forward.clone(), window, cx);
+                    })),
             )
     }
 
