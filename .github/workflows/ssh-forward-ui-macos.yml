@@ -1,0 +1,94 @@
+name: Build SSH forwarding preview for macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/ssh-forward-ui-macos
+    paths:
+      - .github/workflows/ssh-forward-ui-macos.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ssh-forward-ui-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: apple-silicon
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_DEV_INCREMENTAL: 'false'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - name: Check out preview branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Prepare macOS build tools
+        run: |
+          xcodebuild -version
+          command -v cmake || brew install cmake
+          rustup show
+          df -h .
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Bundle debug app with embedded assets
+        run: |
+          # The bundler's final remote-server archive incorrectly hardcodes
+          # release even when -d selects debug. Adjust only the CI checkout.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("script/bundle-mac")
+          source = path.read_text()
+          source = source.replace(
+              "target/$target_triple/release/remote_server",
+              "target/$target_triple/$target_dir/remote_server",
+          )
+          path.write_text(source)
+          PY
+          ./script/bundle-mac -d ${{ matrix.target }}
+
+      - name: Archive app
+        run: |
+          app_path=$(find "target/${{ matrix.target }}/debug/bundle" -maxdepth 3 -type d -name '*.app' -print -quit)
+          test -n "$app_path"
+          codesign --verify --deep --strict "$app_path"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/Zed-SSH-Preview-${{ matrix.arch }}.zip"
+          {
+            echo "### SSH forwarding preview — ${{ matrix.arch }}"
+            echo "Source commit: ${{ github.sha }}"
+            echo "Download the artifact below, extract both ZIP layers, then open the app."
+            echo "This is an ad-hoc signed development app, without Apple notarization."
+            echo "The local Port forwarding preview is enabled in this debug build."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Zed-SSH-Preview-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
