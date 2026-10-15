@@ -25,9 +25,6 @@ jobs:
           - runner: macos-15
             target: aarch64-apple-darwin
             arch: apple-silicon
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            arch: intel
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     env:
