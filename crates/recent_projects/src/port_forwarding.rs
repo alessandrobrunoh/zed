@@ -2,8 +2,9 @@ use crate::RemoteSettings;
 use editor::Editor;
 use futures::channel::oneshot;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, PromptLevel, Render,
-    SharedString, Styled, Subscription, WeakEntity, Window, div, px,
+    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    ParentElement, PromptLevel, Render, SharedString, Styled, Subscription, WeakEntity, Window,
+    div, px,
 };
 use project::Fs;
 use remote::{SshConnectionOptions, SshPortForwardOption};
@@ -416,6 +417,8 @@ impl Focusable for PortForwardingPopover {
     }
 }
 
+impl EventEmitter<DismissEvent> for PortForwardingPopover {}
+
 impl Render for PortForwardingPopover {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex().gap_1();
@@ -503,6 +506,13 @@ impl Render for PortForwardingPopover {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
+            .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
+                if this.editor.is_some() {
+                    this.cancel_edit(cx);
+                } else {
+                    cx.emit(DismissEvent);
+                }
+            }))
             .into_any_element()
     }
 }
@@ -596,9 +606,6 @@ impl PortForwardingPopover {
             )
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
                 this.save_edit(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
-                this.cancel_edit(cx);
             }))
     }
 }
