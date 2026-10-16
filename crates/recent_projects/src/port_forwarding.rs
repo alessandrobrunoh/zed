@@ -542,7 +542,7 @@ impl PortForwardingPopover {
                         format!("edit-port-forward-{index}"),
                         format_forward(&forward),
                     )
-                    .w_full()
+                    .full_width()
                     .label_size(LabelSize::Small)
                     .truncate(true)
                     .end_icon(Icon::new(IconName::Pencil).size(IconSize::Small))
