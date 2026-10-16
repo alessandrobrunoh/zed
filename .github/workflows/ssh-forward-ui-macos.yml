@@ -1,4 +1,4 @@
-# Preview source: feat/ssh-forward-ui @ 2734e52f4921291ee949f54557c9b2a4a4873cf0
+# Preview source: feat/ssh-forward-ui @ b12db05813f2ad3612bfca55db13ac536cb5b43f
 name: Build SSH forwarding preview for macOS
 
 on:
@@ -50,6 +50,12 @@ jobs:
 
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
+
+      - name: Check every workspace target
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+      - name: Run all workspace tests
+        run: cargo test --workspace --target ${{ matrix.target }}
 
       - name: Bundle debug app with embedded assets
         run: |
