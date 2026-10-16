@@ -33,6 +33,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_DEV_INCREMENTAL: 'false'
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_TEST_INCREMENTAL: 'false'
       CARGO_BUILD_JOBS: '2'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
     steps:
@@ -53,6 +55,11 @@ jobs:
 
       - name: Check every workspace target
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+      - name: Check disk space before tests
+        run: |
+          df -h .
+          du -sh target || true
 
       - name: Run all workspace tests
         run: cargo test --workspace --target ${{ matrix.target }}
