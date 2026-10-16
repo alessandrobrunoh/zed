@@ -379,6 +379,7 @@ impl Render for TitleBar {
                                         ))
                                     },
                                 )
+                                .children(self.render_port_forwarding_button(cx))
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -646,10 +647,6 @@ impl TitleBar {
         let workspace = self.workspace.clone();
 
         let options = self.project.read(cx).remote_connection_options(cx)?;
-        let port_forwarding_options = match &options {
-            RemoteConnectionOptions::Ssh(options) => Some(options.clone()),
-            _ => None,
-        };
         let host: SharedString = options.display_name().into();
 
         let (nickname, tooltip_title, icon) = match options {
@@ -738,15 +735,7 @@ impl TitleBar {
             .anchor(gpui::Anchor::TopLeft)
             .into_any_element();
 
-        Some(
-            h_flex()
-                .gap_1()
-                .child(remote_connection_menu)
-                .when_some(port_forwarding_options, |this, options| {
-                    this.child(port_forwarding_popover_trigger(workspace, options, false))
-                })
-                .into_any_element(),
-        )
+        Some(remote_connection_menu)
     }
 
     pub fn render_restricted_mode(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -791,6 +780,37 @@ impl TitleBar {
         }
     }
 
+    fn render_port_forwarding_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let workspace = self.workspace.clone();
+        match self.project.read(cx).remote_connection_options(cx) {
+            Some(RemoteConnectionOptions::Ssh(options)) => {
+                return Some(port_forwarding_popover_trigger(
+                    workspace.clone(),
+                    options,
+                    false,
+                ));
+            }
+            Some(_) => return None,
+            None => {}
+        }
+
+        #[cfg(debug_assertions)]
+        if SHOW_PORT_FORWARDING_PREVIEW
+            && !self.project.read(cx).is_via_remote_server()
+            && !self.project.read(cx).is_disconnected(cx)
+            && self.project.read(cx).host().is_none()
+        {
+            let options = SshConnectionOptions {
+                host: "for-testing-only".into(),
+                nickname: Some("for-testing-only".to_owned()),
+                ..Default::default()
+            };
+            return Some(port_forwarding_popover_trigger(workspace, options, true));
+        }
+
+        None
+    }
+
     pub fn render_project_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.project.read(cx).is_via_remote_server() {
             return self.render_remote_project_connection(cx);
@@ -806,21 +826,7 @@ impl TitleBar {
             );
         }
 
-        let host = self.project.read(cx).host();
-        #[cfg(debug_assertions)]
-        if SHOW_PORT_FORWARDING_PREVIEW && host.is_none() {
-            let options = SshConnectionOptions {
-                host: "for-testing-only".into(),
-                nickname: Some("for-testing-only".to_owned()),
-                ..Default::default()
-            };
-            return Some(port_forwarding_popover_trigger(
-                self.workspace.clone(),
-                options,
-                true,
-            ));
-        }
-        let host = host?;
+        let host = self.project.read(cx).host()?;
         let host_user = self.user_store.read(cx).get_cached_user(host.user_id)?;
         let participant_index = self
             .user_store

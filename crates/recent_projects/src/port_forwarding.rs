@@ -2,7 +2,7 @@ use crate::RemoteSettings;
 use editor::Editor;
 use futures::channel::oneshot;
 use gpui::{
-    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    App, Context, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement, PromptLevel, Render, SharedString, Styled, Subscription, WeakEntity, Window,
     div, px,
 };
@@ -49,6 +49,12 @@ struct ForwardEditor {
     original: Option<SshPortForwardOption>,
     local: Entity<Editor>,
     remote: Entity<Editor>,
+}
+
+fn port_forward_endpoint_input(editor: &Entity<Editor>, cx: &App) -> Div {
+    div()
+        .track_focus(&editor.focus_handle(cx).tab_stop(true))
+        .child(editor.clone())
 }
 
 #[derive(Clone)]
@@ -578,9 +584,17 @@ impl PortForwardingPopover {
             .id("port-forward-editor")
             .w_full()
             .gap_1()
-            .child(div().flex_1().min_w_0().child(editor.local.clone()))
+            .child(
+                port_forward_endpoint_input(&editor.local, cx)
+                    .flex_1()
+                    .min_w_0(),
+            )
             .child(Icon::new(IconName::ArrowRight).color(Color::Muted))
-            .child(div().flex_1().min_w_0().child(editor.remote.clone()))
+            .child(
+                port_forward_endpoint_input(&editor.remote, cx)
+                    .flex_1()
+                    .min_w_0(),
+            )
             .child(
                 IconButton::new("save-port-forward", IconName::Check)
                     .shape(IconButtonShape::Square)
@@ -820,6 +834,29 @@ fn format_forward(forward: &SshPortForwardOption) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{KeyBinding, TestAppContext};
+
+    struct EndpointFocusFixture {
+        focus_handle: FocusHandle,
+        local_editor: Entity<Editor>,
+        remote_editor: Entity<Editor>,
+    }
+
+    impl Render for EndpointFocusFixture {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .id("port-forward-endpoint-focus-test")
+                .track_focus(&self.focus_handle)
+                .tab_group()
+                .on_action(|_: &menu::SelectNext, window, cx| window.focus_next(cx))
+                .on_action(|_: &menu::SelectPrevious, window, cx| window.focus_prev(cx))
+                .on_action(|_: &editor::actions::Tab, window, cx| window.focus_next(cx))
+                .on_action(|_: &editor::actions::Backtab, window, cx| window.focus_prev(cx))
+                .child(Button::new("existing-forward-action", "Existing forward").tab_index(0))
+                .child(port_forward_endpoint_input(&self.local_editor, cx))
+                .child(port_forward_endpoint_input(&self.remote_editor, cx))
+        }
+    }
 
     fn forward(
         local_host: Option<&str>,
@@ -1026,5 +1063,40 @@ mod tests {
             .is_err()
         );
         assert_eq!(settings_content.ssh_connections, original_settings);
+    }
+
+    #[gpui::test]
+    fn tab_moves_between_port_forward_endpoint_inputs(cx: &mut TestAppContext) {
+        cx.update(|_, cx| {
+            cx.bind_keys([
+                KeyBinding::new("tab", menu::SelectNext, None),
+                KeyBinding::new("shift-tab", menu::SelectPrevious, None),
+                KeyBinding::new("tab", editor::actions::Tab, Some("Editor")),
+                KeyBinding::new("shift-tab", editor::actions::Backtab, Some("Editor")),
+            ]);
+        });
+
+        let (fixture, cx) = cx.add_window_view(|window, cx| EndpointFocusFixture {
+            focus_handle: cx.focus_handle(),
+            local_editor: cx.new(|cx| Editor::single_line(window, cx)),
+            remote_editor: cx.new(|cx| Editor::single_line(window, cx)),
+        });
+        let (local_focus, remote_focus) = fixture.read_with(cx, |fixture, cx| {
+            (
+                fixture.local_editor.focus_handle(cx),
+                fixture.remote_editor.focus_handle(cx),
+            )
+        });
+        cx.update(|window, cx| window.focus(&local_focus, cx));
+
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, _| {
+            assert!(remote_focus.is_focused(window));
+        });
+
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, _| {
+            assert!(local_focus.is_focused(window));
+        });
     }
 }
