@@ -1,4 +1,4 @@
-# Preview source: feat/ssh-forward-ui @ b12db05813f2ad3612bfca55db13ac536cb5b43f
+# Preview source: feat/ssh-forward-ui @ 2495d2799e24f5c9706ffe05bd906d386494bd3a
 name: Build SSH forwarding preview for macOS
 
 on:
