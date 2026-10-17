@@ -1,5 +1,5 @@
 # Preview source: feat/ssh-forward-ui @ cd759fdd0874eca017d22dcf849b1fe80937d76d
-name: Build SSH forwarding preview for macOS
+name: Check and build SSH forwarding preview for macOS
 
 on:
   workflow_dispatch:
@@ -17,16 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: macOS ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            arch: apple-silicon
-    runs-on: ${{ matrix.runner }}
+  test:
+    name: Workspace checks and tests
+    runs-on: macos-15
     timeout-minutes: 180
     env:
       CARGO_TERM_COLOR: always
@@ -35,6 +28,39 @@ jobs:
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_PROFILE_TEST_INCREMENTAL: 'false'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - name: Check out preview branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Prepare macOS test tools
+        run: |
+          xcodebuild -version
+          command -v cmake || brew install cmake
+          rustup show
+          df -h .
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Check every workspace target
+        run: cargo check --workspace --all-targets --target aarch64-apple-darwin
+
+      - name: Run all workspace tests
+        run: cargo test --workspace --target aarch64-apple-darwin
+
+  build:
+    name: Build macOS Apple Silicon app
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_DEV_INCREMENTAL: 'false'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
       CARGO_BUILD_JOBS: '2'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
     steps:
@@ -53,17 +79,6 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Check every workspace target
-        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
-
-      - name: Check disk space before tests
-        run: |
-          df -h .
-          du -sh target || true
-
-      - name: Run all workspace tests
-        run: cargo test --workspace --target ${{ matrix.target }}
-
       - name: Bundle debug app with embedded assets
         run: |
           # The bundler's final remote-server archive incorrectly hardcodes
@@ -78,17 +93,17 @@ jobs:
           )
           path.write_text(source)
           PY
-          ./script/bundle-mac -d ${{ matrix.target }}
+          ./script/bundle-mac -d aarch64-apple-darwin
 
       - name: Archive app
         run: |
-          app_path=$(find "target/${{ matrix.target }}/debug/bundle" -maxdepth 3 -type d -name '*.app' -print -quit)
+          app_path=$(find "target/aarch64-apple-darwin/debug/bundle" -maxdepth 3 -type d -name '*.app' -print -quit)
           test -n "$app_path"
           codesign --verify --deep --strict "$app_path"
           mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/Zed-SSH-Preview-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/Zed-SSH-Preview-apple-silicon.zip"
           {
-            echo "### SSH forwarding preview — ${{ matrix.arch }}"
+            echo "### SSH forwarding preview — Apple Silicon"
             echo "Source commit: ${{ github.sha }}"
             echo "Download the artifact below, extract both ZIP layers, then open the app."
             echo "This is an ad-hoc signed development app, without Apple notarization."
@@ -98,7 +113,7 @@ jobs:
       - name: Upload macOS app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: Zed-SSH-Preview-${{ matrix.arch }}
+          name: Zed-SSH-Preview-apple-silicon
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
