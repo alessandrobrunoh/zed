@@ -17,10 +17,101 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Workspace checks and tests
+  plan:
+    name: Plan workspace test shards
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - name: Check out preview branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Create package matrix
+        id: shards
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path(".")
+          with (root / "Cargo.toml").open("rb") as file:
+              workspace = tomllib.load(file)["workspace"]
+
+          members = set()
+          for pattern in workspace["members"]:
+              matches = glob.glob(pattern, recursive=True) if "*" in pattern else [pattern]
+              members.update(matches)
+
+          packages = []
+          for member in sorted(members):
+              manifest = root / member / "Cargo.toml"
+              if not manifest.is_file():
+                  continue
+              with manifest.open("rb") as file:
+                  package = tomllib.load(file).get("package")
+              if package and package.get("name"):
+                  packages.append(package["name"])
+
+          shard_count = 8
+          shards = [[] for _ in range(shard_count)]
+          for index, package in enumerate(packages):
+              shards[index % shard_count].append(package)
+
+          matrix = {
+              "include": [
+                  {"shard": index + 1, "packages": group}
+                  for index, group in enumerate(shards)
+                  if group
+              ]
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps(matrix) + "\n")
+          print(f"Split {len(packages)} workspace packages across {len(matrix['include'])} test shards")
+          PY
+
+  check:
+    name: Check all workspace targets
     runs-on: macos-15
     timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_DEV_INCREMENTAL: 'false'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - name: Check out preview branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Prepare macOS tools
+        run: |
+          xcodebuild -version
+          command -v cmake || brew install cmake
+          rustup show
+          df -h .
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Check every workspace target
+        run: cargo check --workspace --all-targets --target aarch64-apple-darwin
+
+  test:
+    name: Workspace tests (shard ${{ matrix.shard.shard }})
+    needs: [plan, check]
+    runs-on: macos-15
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -30,6 +121,7 @@ jobs:
       CARGO_PROFILE_TEST_INCREMENTAL: 'false'
       CARGO_BUILD_JOBS: '2'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      PACKAGES: ${{ toJSON(matrix.shard.packages) }}
     steps:
       - name: Check out preview branch
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -46,11 +138,23 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Check every workspace target
-        run: cargo check --workspace --all-targets --target aarch64-apple-darwin
+      - name: Run this workspace test shard
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
 
-      - name: Run all workspace tests
-        run: cargo test --workspace --target aarch64-apple-darwin
+          packages = json.loads(os.environ["PACKAGES"])
+          command = [
+              "cargo", "test", "--no-fail-fast",
+              "--target", "aarch64-apple-darwin",
+          ]
+          for package in packages:
+              command.extend(["--package", package])
+          print("Running tests for: " + ", ".join(packages))
+          subprocess.run(command, check=True)
+          PY
 
   build:
     name: Build macOS Apple Silicon app
