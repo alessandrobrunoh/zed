@@ -105,7 +105,7 @@ jobs:
         run: cargo check --workspace --all-targets --target aarch64-apple-darwin
 
   test:
-    name: Workspace tests (shard ${{ matrix.shard.shard }})
+    name: Workspace tests (shard ${{ matrix.shard }})
     needs: [plan, check]
     runs-on: macos-15
     timeout-minutes: 180
@@ -121,7 +121,7 @@ jobs:
       CARGO_PROFILE_TEST_INCREMENTAL: 'false'
       CARGO_BUILD_JOBS: '2'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
-      PACKAGES: ${{ toJSON(matrix.shard.packages) }}
+      PACKAGES: ${{ toJSON(matrix.packages) }}
     steps:
       - name: Check out preview branch
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
