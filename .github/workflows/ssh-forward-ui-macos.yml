@@ -1,4 +1,4 @@
-# Preview source: feat/ssh-forward-ui @ ddd8ffbf0378598dd67b3a96e597d836021ac3cb
+# Preview source: feat/ssh-forward-ui @ b6a44793d4c97b05ed248f9fc702b82397b12c62
 name: Check and build SSH forwarding preview for macOS
 
 on:
@@ -48,7 +48,7 @@ jobs:
         run: cargo check --package recent_projects --package title_bar --all-targets --target aarch64-apple-darwin
 
   test-port-forwarding:
-    name: Port forwarding UI tests (6)
+    name: Port forwarding UI tests (10)
     needs: check
     runs-on: macos-15
     timeout-minutes: 180
@@ -77,16 +77,20 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Run the six new port forwarding UI tests
+      - name: Run the SSH port forwarding tests
         run: |
           status=0
           for test_name in \
             tab_moves_between_port_forward_endpoint_inputs \
             port_forwarding_popover_adapts_to_narrow_windows \
+            port_forwarding_popover_keeps_row_layout_at_breakpoint \
             add_edit_and_validate_port_forward_inputs \
-            saving_a_port_forward_updates_ssh_settings \
+            non_preview_add_edit_and_delete_only_update_the_matching_ssh_entry \
+            non_preview_cancel_invalid_stale_and_ambiguous_settings_do_not_change_forwards \
+            settings_write_failure_keeps_the_forward_and_shows_an_error \
             deleting_a_port_forward_requires_confirmation \
-            clicking_outside_the_port_forwarding_popover_emits_dismiss
+            clicking_outside_the_port_forwarding_popover_emits_dismiss \
+            mounted_port_forwarding_menu_closes_after_outside_click
           do
             echo "Running $test_name"
             cargo test --package recent_projects --lib --target aarch64-apple-darwin "$test_name" || status=1
@@ -94,7 +98,7 @@ jobs:
           exit "$status"
 
   test-title-bar:
-    name: SSH title bar UI test (1)
+    name: SSH title bar tests (4)
     needs: check
     runs-on: macos-15
     timeout-minutes: 180
@@ -123,9 +127,19 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Run the new title bar integration test
-        run: cargo test --package title_bar --lib --target aarch64-apple-darwin port_forwarding_button_follows_worktree_and_branch_controls
-
+      - name: Run the SSH title bar tests
+        run: |
+          status=0
+          for test_name in \
+            port_forwarding_options_are_limited_to_ssh_connections \
+            port_forwarding_trigger_is_visible_only_for_ssh_options \
+            remote_server_menu_does_not_render_a_port_forwarding_trigger \
+            port_forwarding_button_follows_worktree_and_branch_controls
+          do
+            echo "Running $test_name"
+            cargo test --package title_bar --lib --target aarch64-apple-darwin "$test_name" || status=1
+          done
+          exit "$status"
   build:
     name: Build macOS Apple Silicon app
     runs-on: macos-15
